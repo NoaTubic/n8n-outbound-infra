@@ -1,0 +1,266 @@
+{
+  "name": "Lead Enrichment Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "enrich",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst domain = (input.body?.domain || input.domain || '').trim().toLowerCase();\n\nconst domainRegex = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?\\.[a-zA-Z]{2,}$/;\nif (!domain || !domainRegex.test(domain)) {\n  return [{ json: { valid: false, error: 'Invalid domain format' } }];\n}\n\nconst today = new Date().toISOString().split('T')[0];\nreturn [{ json: { valid: true, domain, idempotency_key: `${domain}_${today}` } }];"
+      },
+      "id": "validate",
+      "name": "Validate & Check Idempotency",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [464, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "c1", "leftValue": "={{ $json.valid }}", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "is-valid",
+      "name": "Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [688, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.error, status: 'validation_failed' }) }}",
+        "options": { "responseCode": 400 }
+      },
+      "id": "respond-invalid",
+      "name": "Respond Invalid",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [912, 560]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, status, company_data, contacts, tech_stack, enrichment_steps FROM enrichment_jobs WHERE idempotency_key = '{{ $json.idempotency_key }}' AND status = 'completed' LIMIT 1",
+        "options": {}
+      },
+      "id": "check-cache",
+      "name": "Check Cache",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [912, 304],
+      "credentials": { "postgres": { "id": "YOUR_POSTGRES_CREDENTIAL_ID", "name": "Postgres account" } },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "c2", "leftValue": "={{ $json.id }}", "operator": { "type": "number", "operation": "exists", "singleValue": true } }],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "has-cache",
+      "name": "Has Cached Result?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 304]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ job_id: $json.id, status: 'completed', cached: true, company_data: $json.company_data, contacts: $json.contacts, tech_stack: $json.tech_stack, enrichment_steps: $json.enrichment_steps }) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "respond-cached",
+      "name": "Respond Cached",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1344, 208]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO enrichment_jobs (input_domain, idempotency_key, status) VALUES ('{{ $('Validate & Check Idempotency').first().json.domain }}', '{{ $('Validate & Check Idempotency').first().json.idempotency_key }}', 'enriching') ON CONFLICT (idempotency_key) DO UPDATE SET status = 'enriching', updated_at = NOW() RETURNING id",
+        "options": {}
+      },
+      "id": "create-job",
+      "name": "Create Job Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1344, 400],
+      "credentials": { "postgres": { "id": "YOUR_POSTGRES_CREDENTIAL_ID", "name": "Postgres account" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama-3.3-70b-versatile', temperature: 0.2, max_tokens: 500, messages: [{ role: 'system', content: 'You are a B2B data enrichment API. Given a company domain, return structured JSON about the company.' }, { role: 'user', content: 'Enrich this company domain: ' + $('Validate & Check Idempotency').first().json.domain + '. Return JSON with: name, description, industry, employee_count_range, headquarters, founded_year, website. Only return valid JSON, no markdown.' }] }) }}",
+        "options": {}
+      },
+      "id": "company-http",
+      "name": "Enrich Company Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1568, 208],
+      "credentials": { "groqApi": { "id": "YOUR_GROQ_CREDENTIAL_ID", "name": "Groq account" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nif (input.error || (input.statusCode && input.statusCode >= 400)) {\n  const sc = input.statusCode || 0;\n  const retryable = sc === 429 || sc >= 500 || sc === 0;\n  return [{ json: { success: false, retryable, error: `${retryable ? 'Transient' : 'Permanent'}: ${sc} - ${input.error || input.message || 'Unknown'}`, data: null } }];\n}\ntry {\n  const content = input.choices?.[0]?.message?.content || '';\n  const data = JSON.parse(content.replace(/```json\\n?|```\\n?/g, '').trim());\n  return [{ json: { success: true, data } }];\n} catch (err) {\n  return [{ json: { success: false, retryable: false, error: `Parse error: ${err.message}`, data: null } }];\n}"
+      },
+      "id": "parse-company",
+      "name": "Parse Company Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1792, 208]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama-3.3-70b-versatile', temperature: 0.2, max_tokens: 500, messages: [{ role: 'system', content: 'You are a B2B tech stack analysis API.' }, { role: 'user', content: 'What technologies does the company at ' + $('Validate & Check Idempotency').first().json.domain + ' likely use? Return JSON with: cms, analytics, email_platform, crm, marketing_automation, hosting, frontend_framework, other_tools. Only valid JSON.' }] }) }}",
+        "options": {}
+      },
+      "id": "techstack-http",
+      "name": "Enrich Tech Stack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1568, 400],
+      "credentials": { "groqApi": { "id": "YOUR_GROQ_CREDENTIAL_ID", "name": "Groq account" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nif (input.error || (input.statusCode && input.statusCode >= 400)) {\n  const sc = input.statusCode || 0;\n  const retryable = sc === 429 || sc >= 500 || sc === 0;\n  return [{ json: { success: false, retryable, error: `${retryable ? 'Transient' : 'Permanent'}: ${sc} - ${input.error || input.message || 'Unknown'}`, data: null } }];\n}\ntry {\n  const content = input.choices?.[0]?.message?.content || '';\n  const data = JSON.parse(content.replace(/```json\\n?|```\\n?/g, '').trim());\n  return [{ json: { success: true, data } }];\n} catch (err) {\n  return [{ json: { success: false, retryable: false, error: `Parse error: ${err.message}`, data: null } }];\n}"
+      },
+      "id": "parse-techstack",
+      "name": "Parse Tech Stack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1792, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama-3.3-70b-versatile', temperature: 0.2, max_tokens: 500, messages: [{ role: 'system', content: 'You are a B2B contact research API.' }, { role: 'user', content: 'For the company at ' + $('Validate & Check Idempotency').first().json.domain + ', generate 3 likely decision-maker contacts for B2B sales. Return JSON array with: name, title, department, seniority, likely_email_pattern. Only valid JSON.' }] }) }}",
+        "options": {}
+      },
+      "id": "contacts-http",
+      "name": "Enrich Contacts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1568, 608],
+      "credentials": { "groqApi": { "id": "YOUR_GROQ_CREDENTIAL_ID", "name": "Groq account" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nif (input.error || (input.statusCode && input.statusCode >= 400)) {\n  const sc = input.statusCode || 0;\n  const retryable = sc === 429 || sc >= 500 || sc === 0;\n  return [{ json: { success: false, retryable, error: `${retryable ? 'Transient' : 'Permanent'}: ${sc} - ${input.error || input.message || 'Unknown'}`, data: null } }];\n}\ntry {\n  const content = input.choices?.[0]?.message?.content || '';\n  const data = JSON.parse(content.replace(/```json\\n?|```\\n?/g, '').trim());\n  return [{ json: { success: true, data } }];\n} catch (err) {\n  return [{ json: { success: false, retryable: false, error: `Parse error: ${err.message}`, data: null } }];\n}"
+      },
+      "id": "parse-contacts",
+      "name": "Parse Contacts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1792, 608]
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "options": {}
+      },
+      "id": "merge",
+      "name": "Merge Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const company = $('Parse Company Data').first().json;\nconst techStack = $('Parse Tech Stack').first().json;\nconst contacts = $('Parse Contacts').first().json;\nconst jobId = $('Create Job Record').first().json.id;\nconst domain = $('Validate & Check Idempotency').first().json.domain;\n\nconst steps = { company, techStack, contacts };\nconst succeeded = Object.entries(steps).filter(([k, v]) => v.success);\nconst failed = Object.entries(steps).filter(([k, v]) => !v.success);\n\nlet status = 'completed';\nif (succeeded.length === 0) status = 'failed';\nelse if (failed.length > 0) status = 'partial';\n\nreturn [{\n  json: {\n    job_id: jobId, domain, status,\n    company_data: company.data,\n    tech_stack: techStack.data,\n    contacts: contacts.data,\n    enrichment_steps: Object.fromEntries(Object.entries(steps).map(([k, v]) => [k, v.success ? 'ok' : v.error])),\n    error_log: failed.map(([k, v]) => ({ step: k, error: v.error, retryable: v.retryable }))\n  }\n}];"
+      },
+      "id": "determine-status",
+      "name": "Determine Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2224, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE enrichment_jobs SET status = '{{ $json.status }}', company_data = '{{ JSON.stringify($json.company_data) }}'::jsonb, contacts = '{{ JSON.stringify($json.contacts) }}'::jsonb, tech_stack = '{{ JSON.stringify($json.tech_stack) }}'::jsonb, enrichment_steps = '{{ JSON.stringify($json.enrichment_steps) }}'::jsonb, error_log = '{{ JSON.stringify($json.error_log) }}'::jsonb, updated_at = NOW(), completed_at = CASE WHEN '{{ $json.status }}' IN ('completed','failed') THEN NOW() ELSE NULL END WHERE id = {{ $json.job_id }}",
+        "options": {}
+      },
+      "id": "update-job",
+      "name": "Update Job Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2448, 400],
+      "credentials": { "postgres": { "id": "YOUR_POSTGRES_CREDENTIAL_ID", "name": "Postgres account" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ job_id: $('Determine Status').first().json.job_id, status: $('Determine Status').first().json.status, domain: $('Determine Status').first().json.domain, company_data: $('Determine Status').first().json.company_data, tech_stack: $('Determine Status').first().json.tech_stack, contacts: $('Determine Status').first().json.contacts, enrichment_steps: $('Determine Status').first().json.enrichment_steps }) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "respond-success",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2672, 400]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Validate & Check Idempotency", "type": "main", "index": 0 }]] },
+    "Validate & Check Idempotency": { "main": [[{ "node": "Is Valid?", "type": "main", "index": 0 }]] },
+    "Is Valid?": { "main": [[{ "node": "Check Cache", "type": "main", "index": 0 }], [{ "node": "Respond Invalid", "type": "main", "index": 0 }]] },
+    "Check Cache": { "main": [[{ "node": "Has Cached Result?", "type": "main", "index": 0 }]] },
+    "Has Cached Result?": { "main": [[{ "node": "Respond Cached", "type": "main", "index": 0 }], [{ "node": "Create Job Record", "type": "main", "index": 0 }]] },
+    "Create Job Record": { "main": [[{ "node": "Enrich Company Data", "type": "main", "index": 0 }, { "node": "Enrich Tech Stack", "type": "main", "index": 0 }, { "node": "Enrich Contacts", "type": "main", "index": 0 }]] },
+    "Enrich Company Data": { "main": [[{ "node": "Parse Company Data", "type": "main", "index": 0 }]] },
+    "Enrich Tech Stack": { "main": [[{ "node": "Parse Tech Stack", "type": "main", "index": 0 }]] },
+    "Enrich Contacts": { "main": [[{ "node": "Parse Contacts", "type": "main", "index": 0 }]] },
+    "Parse Company Data": { "main": [[{ "node": "Merge Results", "type": "main", "index": 0 }]] },
+    "Parse Tech Stack": { "main": [[{ "node": "Merge Results", "type": "main", "index": 1 }]] },
+    "Parse Contacts": { "main": [[{ "node": "Merge Results", "type": "main", "index": 2 }]] },
+    "Merge Results": { "main": [[{ "node": "Determine Status", "type": "main", "index": 0 }]] },
+    "Determine Status": { "main": [[{ "node": "Update Job Record", "type": "main", "index": 0 }]] },
+    "Update Job Record": { "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true
+  }
+}

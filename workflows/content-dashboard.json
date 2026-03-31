@@ -1,0 +1,95 @@
+{
+  "name": "Content Dashboard",
+  "id": "7d0I6QnBXtzqSK9R",
+  "active": true,
+  "nodes": [
+    {
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [240, 400],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "content",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "content-stats",
+      "name": "Content Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [460, 400],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT COUNT(*) as total_content, COUNT(*) FILTER (WHERE status = 'drafts_ready') as drafts_ready, COUNT(*) FILTER (WHERE status = 'approved') as approved, COUNT(*) FILTER (WHERE status = 'pending') as pending, COUNT(*) FILTER (WHERE status = 'processing') as processing FROM content_items",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "QpTmcEtYnFaQrtTE", "name": "Postgres account" } },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "recent-content",
+      "name": "Recent Content",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [680, 400],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT ci.id, ci.title, ci.url, ci.source_type, ci.status as content_status, ci.created_at, COUNT(cd.id) as total_drafts, COUNT(cd.id) FILTER (WHERE cd.status = 'draft') as pending_drafts, COUNT(cd.id) FILTER (WHERE cd.status = 'approved') as approved_drafts, COUNT(cd.id) FILTER (WHERE cd.status = 'rejected') as rejected_drafts, COUNT(cd.id) FILTER (WHERE cd.status = 'failed') as failed_drafts FROM content_items ci LEFT JOIN content_drafts cd ON cd.content_id = ci.id GROUP BY ci.id ORDER BY ci.created_at DESC LIMIT 10",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "QpTmcEtYnFaQrtTE", "name": "Postgres account" } },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "all-drafts",
+      "name": "All Drafts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [900, 400],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT cd.id as draft_id, cd.content_id, cd.platform, cd.draft_text, cd.parsed_content, cd.status, cd.approved_at, cd.created_at, ci.title as content_title FROM content_drafts cd JOIN content_items ci ON ci.id = cd.content_id ORDER BY cd.created_at DESC LIMIT 30",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "QpTmcEtYnFaQrtTE", "name": "Postgres account" } },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "generate-html",
+      "name": "Generate HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 400],
+      "parameters": {
+        "jsCode": "// Full HTML generation — see n8n workflow for complete code"
+      }
+    },
+    {
+      "id": "respond",
+      "name": "Respond with HTML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1340, 400],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": { "entries": [{ "name": "Content-Type", "value": "text/html; charset=utf-8" }] }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Content Stats", "type": "main", "index": 0 }]] },
+    "Content Stats": { "main": [[{ "node": "Recent Content", "type": "main", "index": 0 }]] },
+    "Recent Content": { "main": [[{ "node": "All Drafts", "type": "main", "index": 0 }]] },
+    "All Drafts": { "main": [[{ "node": "Generate HTML", "type": "main", "index": 0 }]] },
+    "Generate HTML": { "main": [[{ "node": "Respond with HTML", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

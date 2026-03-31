@@ -1,0 +1,541 @@
+{
+  "updatedAt": "2026-03-31T14:11:17.775Z",
+  "createdAt": "2026-03-31T11:48:25.452Z",
+  "id": "Oduqr2AXZwGXfPVQ",
+  "name": "Inbound Lead Router",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [240, 400],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "inbound-lead",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "64549d29-5f6a-456c-94e0-b4cd36bad383"
+    },
+    {
+      "id": "validate",
+      "name": "Validate & Idempotency",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 400],
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nconst email = (body.email || '').toLowerCase().trim();\nconst name = (body.name || '').trim();\n\nif (!email || !name) {\n  return [{ json: { error: true, message: 'Missing required fields: email and name are required' } }];\n}\n\nconst today = new Date().toISOString().split('T')[0];\nconst idempotencyKey = `${email}_${today}`;\n\nreturn [{ json: { email, name, company: (body.company || '').trim(), role: (body.role || '').trim(), company_size: body.company_size || '', budget: body.budget || '', message: body.message || '', source: body.source || 'unknown', idempotency_key: idempotencyKey } }];"
+      }
+    },
+    {
+      "id": "is-valid",
+      "name": "Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 400],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.email }}",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "respond-error",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [900, 560],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $('Validate & Idempotency').first().json.message, status: 'validation_failed' }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      }
+    },
+    {
+      "id": "check-dup",
+      "name": "Check Duplicates",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [900, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, tier, score FROM inbound_leads WHERE idempotency_key = '{{ $json.idempotency_key }}' LIMIT 1",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "QpTmcEtYnFaQrtTE",
+          "name": "Postgres account"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "is-dup",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.id }}",
+              "operator": {
+                "type": "number",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "respond-dup",
+      "name": "Respond Already Processed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1340, 160],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'already_processed', lead_id: $json.id, tier: $json.tier, score: $json.score }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "score",
+      "name": "Score Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 420],
+      "parameters": {
+        "jsCode": "const lead = $('Validate & Idempotency').first().json;\nlet score = 0;\nconst scoring_breakdown = [];\n\nconst sizeScores = { '1-10': 5, '10-50': 15, '50-200': 25, '200-1000': 30, '1000+': 20 };\nconst sizeScore = sizeScores[lead.company_size] || 10;\nscore += sizeScore;\nscoring_breakdown.push({ factor: 'company_size', value: lead.company_size, points: sizeScore });\n\nconst roleStr = (lead.role || '').toLowerCase();\nlet roleScore = 10;\nif (roleStr.includes('vp') || roleStr.includes('vice president') || roleStr.includes('director')) roleScore = 30;\nelse if (roleStr.includes('head of') || roleStr.includes('chief') || roleStr.includes('cxo') || roleStr.includes('ceo') || roleStr.includes('cmo') || roleStr.includes('cro')) roleScore = 35;\nelse if (roleStr.includes('manager')) roleScore = 20;\nelse if (roleStr.includes('founder') || roleStr.includes('owner')) roleScore = 30;\nscore += roleScore;\nscoring_breakdown.push({ factor: 'role', value: lead.role, points: roleScore });\n\nconst budgetScores = { 'under-1k': 5, '1k-5k': 15, '5k-15k': 25, '15k-50k': 35, '50k+': 30 };\nconst budgetScore = budgetScores[lead.budget] || 10;\nscore += budgetScore;\nscoring_breakdown.push({ factor: 'budget', value: lead.budget, points: budgetScore });\n\nconst msgLength = (lead.message || '').length;\nlet msgScore = 5;\nif (msgLength > 200) msgScore = 20;\nelse if (msgLength > 100) msgScore = 15;\nelse if (msgLength > 50) msgScore = 10;\nscore += msgScore;\nscoring_breakdown.push({ factor: 'message_quality', value: `${msgLength} chars`, points: msgScore });\n\nlet tier = 'cold';\nif (score >= 80) tier = 'hot';\nelse if (score >= 50) tier = 'warm';\n\nreturn [{ json: { ...lead, score, tier, scoring_breakdown } }];"
+      }
+    },
+    {
+      "id": "icp-match",
+      "name": "ICP Match",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1560, 420],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama-3.3-70b-versatile', temperature: 0.3, max_tokens: 600, messages: [{ role: 'system', content: 'You are a B2B sales qualification assistant for ColdIQ, a GTM agency that helps B2B tech companies build outbound systems. Evaluate how well this lead matches our Ideal Customer Profile.' }, { role: 'user', content: 'Evaluate this inbound lead for ICP fit:\\n\\nName: ' + $json.name + '\\nCompany: ' + $json.company + '\\nRole: ' + $json.role + '\\nCompany Size: ' + $json.company_size + '\\nBudget: ' + $json.budget + '\\nMessage: ' + $json.message + '\\n\\nReturn JSON with: icp_score (1-10), fit_reasons (array of strings), concerns (array of strings), recommended_approach (string), personalization_hooks (array of strings). Only return valid JSON, no markdown.' }] }) }}",
+        "options": {}
+      },
+      "continueOnFail": true,
+      "credentials": {
+        "groqApi": {
+          "id": "IwR8AR8Md1hty2wx",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "id": "parse-icp",
+      "name": "Parse ICP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 420],
+      "parameters": {
+        "jsCode": "const lead = $('Score Lead').first().json;\nconst input = $input.first().json;\n\ntry {\n  const content = input.choices?.[0]?.message?.content;\n  if (!content) throw new Error('No response content');\n  const data = JSON.parse(content.replace(/```json\\n?|```\\n?/g, '').trim());\n  return [{ json: { ...lead, icp_match: data } }];\n} catch (err) {\n  return [{ json: { ...lead, icp_match: null } }];\n}"
+      }
+    },
+    {
+      "id": "save-lead",
+      "name": "Save Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2000, 420],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO inbound_leads (email, name, company, role, company_size, budget, message, source, score, tier, icp_match, scoring_breakdown, idempotency_key, processed_at) VALUES ('{{ $json.email }}', '{{ ($json.name || \"\").replace(/'/g, \"''\") }}', '{{ ($json.company || \"\").replace(/'/g, \"''\") }}', '{{ ($json.role || \"\").replace(/'/g, \"''\") }}', '{{ $json.company_size }}', '{{ $json.budget }}', '{{ ($json.message || \"\").replace(/'/g, \"''\") }}', '{{ $json.source }}', {{ $json.score }}, '{{ $json.tier }}', '{{ JSON.stringify($json.icp_match).replace(/'/g, \"''\") }}'::jsonb, '{{ JSON.stringify($json.scoring_breakdown).replace(/'/g, \"''\") }}'::jsonb, '{{ $json.idempotency_key }}', NOW()) RETURNING id",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "QpTmcEtYnFaQrtTE",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "id": "route-lead",
+      "name": "Route Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 420],
+      "parameters": {
+        "jsCode": "const lead = $('Parse ICP').first().json;\nconst saveResult = $input.first().json;\nconst id = saveResult.id;\n\nlet routed_to = 'nurture';\nif (lead.tier === 'hot') routed_to = 'sales_urgent';\nelse if (lead.tier === 'warm') routed_to = 'sales_queue';\n\nlet notification = null;\nif (lead.tier !== 'cold') {\n  const icpSummary = lead.icp_match ? 'ICP Score: ' + lead.icp_match.icp_score + '/10' : 'ICP unavailable';\n  notification = lead.tier === 'hot'\n    ? { text: '🔥 *HOT LEAD* | ' + lead.name + ' (' + lead.company + ') | Score: ' + lead.score + '/100 | ' + lead.role + ' | Budget: ' + lead.budget + ' | ' + icpSummary }\n    : { text: '📋 Warm Lead: ' + lead.name + ' (' + lead.company + ') | Score: ' + lead.score + '/100 | ' + lead.role };\n}\n\nreturn [{ json: { ...lead, id, routed_to, notification } }];"
+      }
+    },
+    {
+      "id": "is-hot-warm",
+      "name": "Is Hot or Warm?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2440, 420],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c3",
+              "leftValue": "={{ $json.notification }}",
+              "operator": {
+                "type": "object",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "gen-reply",
+      "name": "Generate Auto Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [2880, 280],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama-3.3-70b-versatile', temperature: 0.3, max_tokens: 600, messages: [{ role: 'system', content: 'You are a friendly sales assistant for ColdIQ. Write a brief, personalized email reply to an inbound lead. Be warm but professional. Reference something specific from their message. Keep it under 100 words. End with a soft CTA to book a call.' }, { role: 'user', content: 'Lead info:\\nName: ' + $('Route Lead').first().json.name + '\\nCompany: ' + $('Route Lead').first().json.company + '\\nRole: ' + $('Route Lead').first().json.role + '\\nMessage: ' + $('Route Lead').first().json.message + '\\n\\nWrite a reply email. Return JSON with: subject (string), body (string). Only valid JSON.' }] }) }}",
+        "options": {}
+      },
+      "continueOnFail": true,
+      "credentials": {
+        "groqApi": {
+          "id": "IwR8AR8Md1hty2wx",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "id": "parse-reply",
+      "name": "Parse Auto Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3100, 280],
+      "parameters": {
+        "jsCode": "const lead = $('Route Lead').first().json;\nconst input = $input.first().json;\n\nlet auto_reply = null;\ntry {\n  const content = input.choices?.[0]?.message?.content;\n  if (content) {\n    auto_reply = JSON.parse(content.replace(/```json\\n?|```\\n?/g, '').trim());\n  }\n} catch (err) {\n  auto_reply = { subject: 'Thanks for reaching out!', body: 'Hi ' + lead.name + ', thank you for your interest in ColdIQ. We will be in touch shortly.' };\n}\n\nreturn [{ json: { ...lead, auto_reply } }];"
+      }
+    },
+    {
+      "id": "update-lead",
+      "name": "Update Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [3320, 280],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE inbound_leads SET routed_to = '{{ $json.routed_to }}', auto_reply = '{{ JSON.stringify($json.auto_reply).replace(/'/g, \"''\") }}'::jsonb, auto_reply_sent = true, processed_at = NOW() WHERE id = {{ $json.id }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "QpTmcEtYnFaQrtTE",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [3540, 280],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'processed', lead_id: $('Route Lead').first().json.id, score: $('Route Lead').first().json.score, tier: $('Route Lead').first().json.tier, routed_to: $('Route Lead').first().json.routed_to, icp_match: $('Route Lead').first().json.icp_match, auto_reply: $('Parse Auto Reply').first().json.auto_reply }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "update-cold",
+      "name": "Update Cold Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2660, 560],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE inbound_leads SET routed_to = '{{ $json.routed_to }}', auto_reply_sent = false, processed_at = NOW() WHERE id = {{ $json.id }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "QpTmcEtYnFaQrtTE",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "id": "respond-cold",
+      "name": "Respond Cold",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2880, 560],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'processed', lead_id: $('Route Lead').first().json.id, score: $('Route Lead').first().json.score, tier: $('Route Lead').first().json.tier, routed_to: $('Route Lead').first().json.routed_to, icp_match: $('Route Lead').first().json.icp_match, auto_reply: null }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate & Idempotency",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Idempotency": {
+      "main": [
+        [
+          {
+            "node": "Is Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid?": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicates",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicates": {
+      "main": [
+        [
+          {
+            "node": "Is Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Respond Already Processed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Score Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Lead": {
+      "main": [
+        [
+          {
+            "node": "ICP Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ICP Match": {
+      "main": [
+        [
+          {
+            "node": "Parse ICP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse ICP": {
+      "main": [
+        [
+          {
+            "node": "Save Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Lead": {
+      "main": [
+        [
+          {
+            "node": "Route Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Lead": {
+      "main": [
+        [
+          {
+            "node": "Is Hot or Warm?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Hot or Warm?": {
+      "main": [
+        [
+          {
+            "node": "Generate Auto Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Cold Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Auto Reply": {
+      "main": [
+        [
+          {
+            "node": "Parse Auto Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Auto Reply": {
+      "main": [
+        [
+          {
+            "node": "Update Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Lead": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Cold Lead": {
+      "main": [
+        [
+          {
+            "node": "Respond Cold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": null,
+  "versionId": "0b8bf1e7-eae2-441e-80c9-e096e7c58371",
+  "tags": []
+}

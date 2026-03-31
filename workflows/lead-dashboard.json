@@ -1,0 +1,22 @@
+{
+  "name": "Lead Dashboard",
+  "id": "opLfNUn9IR6bqbxH",
+  "active": true,
+  "nodeCount": 6,
+  "trigger": "Webhook GET /leads",
+  "description": "Serves branded HTML dashboard showing lead stats, recent leads table, and enrichment pipeline stats",
+  "nodes": [
+    "Webhook",
+    "Lead Stats",
+    "Recent Leads",
+    "Enrichment Stats",
+    "Generate HTML",
+    "Respond with HTML"
+  ],
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "credentials_required": [
+    "Postgres account"
+  ]
+}

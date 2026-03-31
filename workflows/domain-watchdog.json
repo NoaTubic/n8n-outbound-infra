@@ -1,0 +1,236 @@
+{
+  "name": "Domain Watchdog",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 7 * * *" }] }
+      },
+      "id": "schedule",
+      "name": "Daily Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, domain FROM monitored_domains WHERE is_active = true",
+        "options": {}
+      },
+      "id": "get-domains",
+      "name": "Get Active Domains",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [464, 400],
+      "credentials": { "postgres": { "id": "YOUR_POSTGRES_CREDENTIAL_ID", "name": "Postgres account" } }
+    },
+    {
+      "parameters": { "options": {} },
+      "id": "split",
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [688, 400]
+    },
+    {
+      "parameters": {
+        "url": "=https://dns.google/resolve?name={{ $json.domain }}&type=TXT",
+        "options": {}
+      },
+      "id": "spf-http",
+      "name": "Check SPF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [912, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const answers = $input.first().json.Answer || [];\nconst txtRecords = answers.filter(a => a.type === 16).map(a => a.data.replace(/\\\"/g, ''));\nconst spfRecord = txtRecords.find(r => r.includes('v=spf1'));\nreturn [{ json: { spf_valid: !!spfRecord, spf_record: spfRecord || null, has_dangerous_all: spfRecord ? spfRecord.includes('+all') : false } }];"
+      },
+      "id": "parse-spf",
+      "name": "Parse SPF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 400]
+    },
+    {
+      "parameters": {
+        "url": "=https://dns.google/resolve?name=_dmarc.{{ $('Split In Batches').first().json.domain }}&type=TXT",
+        "options": {}
+      },
+      "id": "dmarc-http",
+      "name": "Check DMARC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1344, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const answers = $input.first().json.Answer || [];\nconst txt = answers.filter(a => a.type === 16).map(a => a.data.replace(/\\\"/g, ''));\nconst dmarcRecord = txt.find(r => r.includes('v=DMARC1'));\nreturn [{ json: { dmarc_valid: !!dmarcRecord, dmarc_record: dmarcRecord || null, policy: dmarcRecord ? (dmarcRecord.match(/p=(\\w+)/)?.[1] || 'unknown') : null } }];"
+      },
+      "id": "parse-dmarc",
+      "name": "Parse DMARC",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1568, 400]
+    },
+    {
+      "parameters": {
+        "url": "=https://dns.google/resolve?name={{ $('Split In Batches').first().json.domain }}&type=MX",
+        "options": {}
+      },
+      "id": "mx-http",
+      "name": "Check MX",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1792, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const answers = $input.first().json.Answer || [];\nconst mxRecords = answers.filter(a => a.type === 15).map(a => ({ priority: parseInt(a.data.split(' ')[0]), exchange: a.data.split(' ')[1] }));\nreturn [{ json: { has_mx: mxRecords.length > 0, mx_count: mxRecords.length, mx_records: mxRecords } }];"
+      },
+      "id": "parse-mx",
+      "name": "Parse MX",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "url": "=https://dns.google/resolve?name=google._domainkey.{{ $('Split In Batches').first().json.domain }}&type=TXT",
+        "options": {}
+      },
+      "id": "dkim-http",
+      "name": "Check DKIM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2224, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const answers = $input.first().json.Answer || [];\nconst txt = answers.filter(a => a.type === 16).map(a => a.data.replace(/\\\"/g, ''));\nconst dkimRecord = txt.find(r => r.includes('v=DKIM1') || r.includes('p='));\nreturn [{ json: { dkim_valid: !!dkimRecord, dkim_record: dkimRecord || null, selector_found: dkimRecord ? 'google' : null } }];"
+      },
+      "id": "parse-dkim",
+      "name": "Parse DKIM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2448, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const spf = $('Parse SPF').first().json;\nconst dmarc = $('Parse DMARC').first().json;\nconst mx = $('Parse MX').first().json;\nconst dkim = $('Parse DKIM').first().json;\nconst domain = $('Split In Batches').first().json;\n\nlet status = 'healthy';\nconst issues = [];\nif (!spf.spf_valid) { status = 'critical'; issues.push('SPF record missing'); }\nif (spf.has_dangerous_all) { status = 'critical'; issues.push('SPF has +all (anyone can spoof)'); }\nif (!dmarc.dmarc_valid) { if (status !== 'critical') status = 'warning'; issues.push('DMARC record missing'); }\nif (dmarc.policy === 'none') { issues.push('DMARC policy is none (monitoring only)'); }\nif (!dkim.dkim_valid) { if (status !== 'critical') status = 'warning'; issues.push('DKIM not found on common selectors'); }\nif (!mx.has_mx) { status = 'critical'; issues.push('No MX records'); }\n\nconst result = { domain_id: domain.id, domain: domain.domain, overall_status: status, spf_valid: spf.spf_valid, spf_record: spf.spf_record, dkim_valid: dkim.dkim_valid, dkim_record: dkim.dkim_record, dmarc_valid: dmarc.dmarc_valid, dmarc_record: dmarc.dmarc_record, mx_records: mx.mx_records, blacklist_hits: [], issues, raw_results: { spf, dmarc, mx, dkim } };\n\nconst esc = (s) => s != null ? \"'\" + String(s).replace(/'/g, \"''\") + \"'\" : 'NULL';\nresult.store_sql = `INSERT INTO domain_checks (domain_id, spf_valid, spf_record, dkim_valid, dkim_record, dmarc_valid, dmarc_record, mx_records, blacklist_hits, overall_status, raw_results) VALUES (${result.domain_id}, ${result.spf_valid}, ${esc(result.spf_record)}, ${result.dkim_valid}, ${esc(result.dkim_record)}, ${result.dmarc_valid}, ${esc(result.dmarc_record)}, '${JSON.stringify(result.mx_records).replace(/'/g, \"''\")}'::jsonb, '[]'::jsonb, '${result.overall_status}', '${JSON.stringify(result.raw_results).replace(/'/g, \"''\")}'::jsonb) RETURNING id`;\n\nreturn [{ json: result }];"
+      },
+      "id": "determine-status",
+      "name": "Determine Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2672, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.store_sql }}",
+        "options": {}
+      },
+      "id": "store-check",
+      "name": "Store Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2880, 400],
+      "credentials": { "postgres": { "id": "YOUR_POSTGRES_CREDENTIAL_ID", "name": "Postgres account" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM domain_checks WHERE domain_id = {{ $('Determine Status').first().json.domain_id }} ORDER BY checked_at DESC LIMIT 1 OFFSET 1",
+        "options": {}
+      },
+      "id": "get-previous",
+      "name": "Get Previous Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [3104, 400],
+      "credentials": { "postgres": { "id": "YOUR_POSTGRES_CREDENTIAL_ID", "name": "Postgres account" } },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const current = $('Determine Status').first().json;\nconst previous = $('Get Previous Check').first().json;\n\nif (!previous || !previous.id) {\n  return [{ json: { changed: true, is_first: true, alerts: [{ type: 'first_check', severity: 'info', message: `First check recorded for ${current.domain}` }], domain_id: current.domain_id } }];\n}\n\nconst alerts = [];\nif (previous.spf_valid && !current.spf_valid) alerts.push({ type: 'spf_missing', severity: 'critical', message: `SPF record removed from ${current.domain}` });\nif (previous.dkim_valid && !current.dkim_valid) alerts.push({ type: 'dkim_failed', severity: 'warning', message: `DKIM validation failed for ${current.domain}` });\nif (previous.dmarc_valid && !current.dmarc_valid) alerts.push({ type: 'dmarc_missing', severity: 'warning', message: `DMARC record removed from ${current.domain}` });\nif (previous.overall_status !== current.overall_status) alerts.push({ type: 'status_change', severity: current.overall_status === 'critical' ? 'critical' : 'info', message: `${current.domain}: ${previous.overall_status} → ${current.overall_status}` });\n\nreturn [{ json: { changed: alerts.length > 0, alerts, domain: current.domain, domain_id: current.domain_id } }];"
+      },
+      "id": "compare",
+      "name": "Compare Changes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3328, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "c1", "leftValue": "={{ $json.changed }}", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "has-changes",
+      "name": "Has Changes?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3552, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nif (!data.alerts || data.alerts.length === 0) {\n  return [{ json: { sql: 'SELECT 1', alert_count: 0 } }];\n}\nconst values = data.alerts.map(a => `(${data.domain_id}, '${a.type}', '${a.message.replace(/'/g, \"''\")}', '${a.severity}')`).join(', ');\nreturn [{ json: { sql: `INSERT INTO domain_alerts (domain_id, alert_type, message, severity) VALUES ${values}`, alert_count: data.alerts.length } }];"
+      },
+      "id": "build-alert-sql",
+      "name": "Build Alert SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3760, 304]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.sql }}",
+        "options": {}
+      },
+      "id": "insert-alerts",
+      "name": "Insert Alerts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [3984, 304],
+      "credentials": { "postgres": { "id": "YOUR_POSTGRES_CREDENTIAL_ID", "name": "Postgres account" } }
+    }
+  ],
+  "connections": {
+    "Daily Schedule": { "main": [[{ "node": "Get Active Domains", "type": "main", "index": 0 }]] },
+    "Get Active Domains": { "main": [[{ "node": "Split In Batches", "type": "main", "index": 0 }]] },
+    "Split In Batches": { "main": [[], [{ "node": "Check SPF", "type": "main", "index": 0 }]] },
+    "Check SPF": { "main": [[{ "node": "Parse SPF", "type": "main", "index": 0 }]] },
+    "Parse SPF": { "main": [[{ "node": "Check DMARC", "type": "main", "index": 0 }]] },
+    "Check DMARC": { "main": [[{ "node": "Parse DMARC", "type": "main", "index": 0 }]] },
+    "Parse DMARC": { "main": [[{ "node": "Check MX", "type": "main", "index": 0 }]] },
+    "Check MX": { "main": [[{ "node": "Parse MX", "type": "main", "index": 0 }]] },
+    "Parse MX": { "main": [[{ "node": "Check DKIM", "type": "main", "index": 0 }]] },
+    "Check DKIM": { "main": [[{ "node": "Parse DKIM", "type": "main", "index": 0 }]] },
+    "Parse DKIM": { "main": [[{ "node": "Determine Status", "type": "main", "index": 0 }]] },
+    "Determine Status": { "main": [[{ "node": "Store Check", "type": "main", "index": 0 }]] },
+    "Store Check": { "main": [[{ "node": "Get Previous Check", "type": "main", "index": 0 }]] },
+    "Get Previous Check": { "main": [[{ "node": "Compare Changes", "type": "main", "index": 0 }]] },
+    "Compare Changes": { "main": [[{ "node": "Has Changes?", "type": "main", "index": 0 }]] },
+    "Has Changes?": { "main": [[{ "node": "Build Alert SQL", "type": "main", "index": 0 }], [{ "node": "Split In Batches", "type": "main", "index": 0 }]] },
+    "Build Alert SQL": { "main": [[{ "node": "Insert Alerts", "type": "main", "index": 0 }]] },
+    "Insert Alerts": { "main": [[{ "node": "Split In Batches", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true
+  }
+}

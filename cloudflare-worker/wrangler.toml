@@ -1,0 +1,9 @@
+name = "domain-pulse-dashboard"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+N8N_STATUS_WEBHOOK_URL = "https://n8n-production-7e59.up.railway.app/webhook/domain-status"
+N8N_ADD_DOMAIN_URL = "https://n8n-production-7e59.up.railway.app/webhook/add-domain"
+STATUS_API_KEY = "demo-key-change-me"
+N8N_ENRICH_URL = "https://n8n-production-7e59.up.railway.app/webhook/enrich"

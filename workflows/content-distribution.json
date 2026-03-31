@@ -1,0 +1,241 @@
+{
+  "name": "Content Distribution Pipeline",
+  "id": "EWqe87yHGWz7rl3g",
+  "active": true,
+  "nodes": [
+    {
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [240, 400],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "new-content",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "validate",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 400],
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst body = input.body || input;\nconst title = (body.title || '').trim();\nconst content = (body.content || '').trim();\n\nif (!title || !content) {\n  return [{ json: { valid: false, error: 'Missing required fields: title and content' } }];\n}\n\nreturn [{\n  json: {\n    valid: true,\n    title: title,\n    url: (body.url || '').trim(),\n    source_type: (body.source_type || 'blog_post').trim(),\n    original_content: content.substring(0, 5000)\n  }\n}];"
+      }
+    },
+    {
+      "id": "is-valid",
+      "name": "Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 400],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "c1", "leftValue": "={{ $json.valid }}", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "respond-invalid",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [900, 560],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.error, status: 'validation_failed' }) }}",
+        "options": { "responseCode": 400 }
+      }
+    },
+    {
+      "id": "store-content",
+      "name": "Store Content",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [900, 400],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO content_items (title, url, source_type, original_content, status) VALUES ('{{ $json.title.replace(/'/g, \"''\") }}', '{{ $json.url }}', '{{ $json.source_type }}', '{{ $json.original_content.replace(/'/g, \"''\") }}', 'processing') RETURNING id",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "QpTmcEtYnFaQrtTE", "name": "Postgres account" } }
+    },
+    {
+      "id": "gen-linkedin",
+      "name": "Gen LinkedIn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama-3.3-70b-versatile', temperature: 0.7, max_tokens: 800, messages: [{ role: 'system', content: 'You are a B2B content writer creating LinkedIn posts for ColdIQ, a GTM agency. Write engaging, professional LinkedIn posts that drive engagement and position ColdIQ as a thought leader. Use short paragraphs, line breaks between ideas, and a strong hook opener. No hashtags unless highly relevant. Keep it under 1300 characters.' }, { role: 'user', content: 'Create a LinkedIn post based on this article:\\n\\nTitle: ' + $('Validate Input').first().json.title + '\\nURL: ' + $('Validate Input').first().json.url + '\\nContent: ' + $('Validate Input').first().json.original_content.substring(0, 2000) + '\\n\\nReturn JSON with: text (the full LinkedIn post including the URL at the end), hook (the opening line), char_count (number). Only valid JSON, no markdown.' }] }) }}",
+        "options": {}
+      },
+      "credentials": { "groqApi": { "id": "IwR8AR8Md1hty2wx", "name": "Groq account" } },
+      "continueOnFail": true
+    },
+    {
+      "id": "parse-linkedin",
+      "name": "Parse LinkedIn",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1360, 200],
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\ntry {\n  if (input.error || (input.statusCode && input.statusCode >= 400)) throw new Error(input.error || 'HTTP ' + input.statusCode);\n  const content = input.choices?.[0]?.message?.content;\n  if (!content) throw new Error('No content');\n  const data = JSON.parse(content.replace(/```json\\n?|```\\n?/g, '').trim());\n  return [{ json: { platform: 'linkedin', success: true, parsed_content: data, draft_text: data.text } }];\n} catch (err) {\n  return [{ json: { platform: 'linkedin', success: false, error: err.message, draft_text: '', parsed_content: null } }];\n}"
+      }
+    },
+    {
+      "id": "gen-twitter",
+      "name": "Gen Twitter",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 400],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama-3.3-70b-versatile', temperature: 0.7, max_tokens: 800, messages: [{ role: 'system', content: 'You are a B2B content writer creating Twitter/X posts for ColdIQ. Write a punchy tweet or short thread (max 3 tweets). Each tweet must be under 280 characters. Be direct, use concrete numbers when possible, no fluff. Make the first tweet a strong standalone hook.' }, { role: 'user', content: 'Create a Twitter/X post or short thread based on this article:\\n\\nTitle: ' + $('Validate Input').first().json.title + '\\nURL: ' + $('Validate Input').first().json.url + '\\nContent: ' + $('Validate Input').first().json.original_content.substring(0, 2000) + '\\n\\nReturn JSON with: tweets (array of strings, each under 280 chars, include URL in last tweet), hook (the first tweet), tweet_count (number). Only valid JSON, no markdown.' }] }) }}",
+        "options": {}
+      },
+      "credentials": { "groqApi": { "id": "IwR8AR8Md1hty2wx", "name": "Groq account" } },
+      "continueOnFail": true
+    },
+    {
+      "id": "parse-twitter",
+      "name": "Parse Twitter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1360, 400],
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\ntry {\n  if (input.error || (input.statusCode && input.statusCode >= 400)) throw new Error(input.error || 'HTTP ' + input.statusCode);\n  const content = input.choices?.[0]?.message?.content;\n  if (!content) throw new Error('No content');\n  const data = JSON.parse(content.replace(/```json\\n?|```\\n?/g, '').trim());\n  const text = Array.isArray(data.tweets) ? data.tweets.join('\\n\\n') : data.text || '';\n  return [{ json: { platform: 'twitter', success: true, parsed_content: data, draft_text: text } }];\n} catch (err) {\n  return [{ json: { platform: 'twitter', success: false, error: err.message, draft_text: '', parsed_content: null } }];\n}"
+      }
+    },
+    {
+      "id": "gen-email",
+      "name": "Gen Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 600],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama-3.3-70b-versatile', temperature: 0.7, max_tokens: 800, messages: [{ role: 'system', content: 'You are writing a brief email newsletter section for ColdIQ\\'s weekly GTM newsletter. Write a 2-3 sentence summary that makes readers want to click through to the full article. Conversational tone, value-focused. Include a clear CTA.' }, { role: 'user', content: 'Create a newsletter snippet based on this article:\\n\\nTitle: ' + $('Validate Input').first().json.title + '\\nURL: ' + $('Validate Input').first().json.url + '\\nContent: ' + $('Validate Input').first().json.original_content.substring(0, 2000) + '\\n\\nReturn JSON with: headline (string), body (string, 2-3 sentences max), cta_text (string, e.g. Read the full breakdown). Only valid JSON, no markdown.' }] }) }}",
+        "options": {}
+      },
+      "credentials": { "groqApi": { "id": "IwR8AR8Md1hty2wx", "name": "Groq account" } },
+      "continueOnFail": true
+    },
+    {
+      "id": "parse-email",
+      "name": "Parse Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1360, 600],
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\ntry {\n  if (input.error || (input.statusCode && input.statusCode >= 400)) throw new Error(input.error || 'HTTP ' + input.statusCode);\n  const content = input.choices?.[0]?.message?.content;\n  if (!content) throw new Error('No content');\n  const data = JSON.parse(content.replace(/```json\\n?|```\\n?/g, '').trim());\n  const text = (data.headline || '') + '\\n\\n' + (data.body || '') + '\\n\\n' + (data.cta_text || '');\n  return [{ json: { platform: 'email_newsletter', success: true, parsed_content: data, draft_text: text } }];\n} catch (err) {\n  return [{ json: { platform: 'email_newsletter', success: false, error: err.message, draft_text: '', parsed_content: null } }];\n}"
+      }
+    },
+    {
+      "id": "merge",
+      "name": "Merge Drafts",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1580, 400],
+      "parameters": { "mode": "append", "options": {} }
+    },
+    {
+      "id": "store-drafts",
+      "name": "Store Drafts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1800, 400],
+      "parameters": {
+        "jsCode": "const linkedin = $('Parse LinkedIn').first().json;\nconst twitter = $('Parse Twitter').first().json;\nconst email = $('Parse Email').first().json;\nconst contentId = $('Store Content').first().json.id;\n\nconst drafts = [linkedin, twitter, email];\nconst esc = (s) => String(s || '').replace(/'/g, \"''\");\n\nconst values = drafts.map(d => {\n  const pc = JSON.stringify(d.parsed_content || {}).replace(/'/g, \"''\");\n  const status = d.success ? 'draft' : 'failed';\n  return `(${contentId}, '${esc(d.platform)}', '${esc(d.draft_text)}', '${pc}'::jsonb, '${status}')`;\n}).join(',\\n');\n\nreturn [{ json: { contentId, sql: `INSERT INTO content_drafts (content_id, platform, draft_text, parsed_content, status) VALUES\\n${values}`, drafts } }];"
+      }
+    },
+    {
+      "id": "insert-drafts",
+      "name": "Insert Drafts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2020, 400],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "QpTmcEtYnFaQrtTE", "name": "Postgres account" } }
+    },
+    {
+      "id": "update-status",
+      "name": "Update Content Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2240, 400],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE content_items SET status = 'drafts_ready', processed_at = NOW() WHERE id = {{ $('Store Content').first().json.id }}",
+        "options": {}
+      },
+      "credentials": { "postgres": { "id": "QpTmcEtYnFaQrtTE", "name": "Postgres account" } }
+    },
+    {
+      "id": "build-response",
+      "name": "Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2460, 400],
+      "parameters": {
+        "jsCode": "const drafts = $('Store Drafts').first().json.drafts;\nconst contentId = $('Store Content').first().json.id;\n\nreturn [{\n  json: {\n    status: 'drafts_generated',\n    content_id: contentId,\n    platforms: {\n      linkedin: drafts.find(d => d.platform === 'linkedin')?.success || false,\n      twitter: drafts.find(d => d.platform === 'twitter')?.success || false,\n      email_newsletter: drafts.find(d => d.platform === 'email_newsletter')?.success || false\n    },\n    drafts: drafts.map(d => ({\n      platform: d.platform,\n      success: d.success,\n      preview: (d.draft_text || '').substring(0, 100) + '...'\n    }))\n  }\n}];"
+      }
+    },
+    {
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2680, 400],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": { "responseCode": 200 }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Validate Input", "type": "main", "index": 0 }]] },
+    "Validate Input": { "main": [[{ "node": "Is Valid?", "type": "main", "index": 0 }]] },
+    "Is Valid?": { "main": [[{ "node": "Store Content", "type": "main", "index": 0 }], [{ "node": "Respond Error", "type": "main", "index": 0 }]] },
+    "Store Content": { "main": [[{ "node": "Gen LinkedIn", "type": "main", "index": 0 }, { "node": "Gen Twitter", "type": "main", "index": 0 }, { "node": "Gen Email", "type": "main", "index": 0 }]] },
+    "Gen LinkedIn": { "main": [[{ "node": "Parse LinkedIn", "type": "main", "index": 0 }]] },
+    "Gen Twitter": { "main": [[{ "node": "Parse Twitter", "type": "main", "index": 0 }]] },
+    "Gen Email": { "main": [[{ "node": "Parse Email", "type": "main", "index": 0 }]] },
+    "Parse LinkedIn": { "main": [[{ "node": "Merge Drafts", "type": "main", "index": 0 }]] },
+    "Parse Twitter": { "main": [[{ "node": "Merge Drafts", "type": "main", "index": 1 }]] },
+    "Parse Email": { "main": [[{ "node": "Merge Drafts", "type": "main", "index": 2 }]] },
+    "Merge Drafts": { "main": [[{ "node": "Store Drafts", "type": "main", "index": 0 }]] },
+    "Store Drafts": { "main": [[{ "node": "Insert Drafts", "type": "main", "index": 0 }]] },
+    "Insert Drafts": { "main": [[{ "node": "Update Content Status", "type": "main", "index": 0 }]] },
+    "Update Content Status": { "main": [[{ "node": "Build Response", "type": "main", "index": 0 }]] },
+    "Build Response": { "main": [[{ "node": "Respond Success", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}
